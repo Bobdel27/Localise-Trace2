@@ -179,6 +179,8 @@
     transform:translateX(-50%) translateY(0);
   }
   .panel-scroll{
+    flex:1 1 auto;
+    min-height:0;
     overflow-y:auto;
     padding:18px 20px calc(env(safe-area-inset-bottom) + 18px);
     -webkit-overflow-scrolling:touch;
@@ -313,6 +315,15 @@
     border-color:transparent;
     box-shadow:0 0 0 1px rgba(52,104,165,.55), 0 0 20px 4px rgba(52,104,165,.6);
   }
+  .btn-gpx{
+    width:100%; padding:12px 14px;
+    margin-top:10px;
+    background:transparent;
+    border:1px solid var(--brass);
+    color:var(--brass-light);
+  }
+  .btn-gpx:hover{background:rgba(201,150,63,.12);}
+  .btn-gpx:disabled{opacity:.4; cursor:not-allowed;}
   .route-mode-row{display:flex; gap:6px; margin-top:8px;}
   .route-mode{
     flex:1;
@@ -629,6 +640,10 @@
       </button>
     </div>
     <div class="route-info" id="routeInfo"></div>
+    <button class="btn btn-gpx" id="btnGpxExport" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>
+      <span>Exporter le tracé en GPX</span>
+    </button>
 
     <h2 class="sect">Adresse</h2>
     <div class="field-row">
@@ -707,6 +722,10 @@
   var btnRoute = document.getElementById('btnRoute');
   var routeLabel = document.getElementById('routeLabel');
   var routeInfo = document.getElementById('routeInfo');
+
+  window.addEventListener('error', function(e){
+    toast('Erreur : ' + (e && e.message ? e.message : 'inconnue'));
+  });
 
   function toast(msg){
     toastEl.textContent = msg;
@@ -926,7 +945,7 @@
         bestAcc = acc;
         locked = false;
         placeMarker(pos.coords.latitude, pos.coords.longitude, true, 17);
-        placeMeMarker(pos.coords.latitude, pos.coords.longitude);
+        try{ placeMeMarker(pos.coords.latitude, pos.coords.longitude); }catch(e){}
         showAccuracyCircle(pos.coords.latitude, pos.coords.longitude, acc);
       }
       // s'arrête dès que la précision est bonne, ou après 9s d'affinage
@@ -1017,6 +1036,9 @@
   /* ---------- Itinéraire (ma position -> repère) ---------- */
   var routeMode = 'driving';
   var routeLine = null;
+  var routeStart = null, routeDest = null;
+  var btnGpxExport = document.getElementById('btnGpxExport');
+  var ROUTE_NAMES = { driving:'Voiture', walking:'À pied', cycling:'Vélo' };
   var routeResults = {}; // cache par mode : { coords, distance, duration }
   var ROUTE_PROFILES = {
     driving: { url:'https://routing.openstreetmap.de/routed-car/route/v1/driving/', color:'#3468a5' },
@@ -1050,6 +1072,7 @@
     btnRoute.classList.remove('is-active');
     routeLabel.textContent = 'De ma position au repère';
     routeResults = {};
+    btnGpxExport.disabled = true;
     Object.keys(rmInfoEls).forEach(function(k){ rmInfoEls[k].textContent = '—'; });
   }
 
@@ -1090,6 +1113,7 @@
       ' &nbsp;·&nbsp; <span class="rlbl">DURÉE</span> ' + formatDuration(duration);
     routeInfo.classList.add('show');
     routeLabel.textContent = 'Recalculer l\'itinéraire';
+    btnGpxExport.disabled = false;
   }
 
   function fetchOneRoute(mode, startLat, startLon, dest){
@@ -1137,6 +1161,8 @@
       var startLat = pos.coords.latitude, startLon = pos.coords.longitude;
       var dest = marker.getLatLng();
       placeMeMarker(startLat, startLon);
+      routeStart = { lat:startLat, lon:startLon };
+      routeDest = { lat:dest.lat, lon:dest.lng };
 
       var modes = Object.keys(ROUTE_PROFILES);
       Promise.all(modes.map(function(m){ return fetchOneRoute(m, startLat, startLon, dest); }))
@@ -1167,6 +1193,47 @@
   }
 
   btnRoute.addEventListener('click', requestRoute);
+
+  /* ---------- Export GPX ---------- */
+  function xmlEsc(t){
+    return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function buildGpx(){
+    var name = 'Itinéraire ' + ROUTE_NAMES[routeMode];
+    var pts = routeLine.getLatLngs();
+    var out = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<gpx version="1.1" creator="Méridien" xmlns="http://www.topografix.com/GPX/1/1">\n' +
+      '  <metadata><name>' + xmlEsc(name) + '</name><time>' + new Date().toISOString() + '</time></metadata>\n';
+    if(routeStart){ out += '  <wpt lat="' + routeStart.lat.toFixed(6) + '" lon="' + routeStart.lon.toFixed(6) + '"><name>Départ</name></wpt>\n'; }
+    if(routeDest){ out += '  <wpt lat="' + routeDest.lat.toFixed(6) + '" lon="' + routeDest.lon.toFixed(6) + '"><name>Arrivée</name></wpt>\n'; }
+    out += '  <trk>\n    <name>' + xmlEsc(name) + '</name>\n    <trkseg>\n';
+    pts.forEach(function(p){
+      out += '      <trkpt lat="' + p.lat.toFixed(6) + '" lon="' + p.lng.toFixed(6) + '"/>\n';
+    });
+    out += '    </trkseg>\n  </trk>\n</gpx>\n';
+    return out;
+  }
+
+  btnGpxExport.addEventListener('click', function(){
+    if(!routeLine){ toast('Calculez d\'abord un itinéraire.'); return; }
+    var fileName = 'itineraire-' + routeMode + '.gpx';
+    var blob = new Blob([buildGpx()], { type:'application/gpx+xml' });
+    var file = null;
+    try{ file = new File([blob], fileName, { type:'application/gpx+xml' }); }catch(e){}
+
+    if(file && navigator.canShare && navigator.canShare({ files:[file] })){
+      navigator.share({ files:[file], title:'Itinéraire ' + ROUTE_NAMES[routeMode] })
+        .catch(function(err){ if(err && err.name !== 'AbortError'){ toast('Partage impossible.'); } });
+      return;
+    }
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+    toast('Fichier GPX généré.');
+  });
 
   /* ---------- Adresse ---------- */
   function searchAddress(){
@@ -1236,7 +1303,7 @@
     var p = marker.getLatLng();
     var link = 'https://maps.google.com/?q=' + p.lat.toFixed(6) + ',' + p.lng.toFixed(6);
     var body = 'Ma position : ' + p.lat.toFixed(6) + ', ' + p.lng.toFixed(6) + ' — ' + link;
-    var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+    var isIOS = (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) && !window.MSStream;
     var uri = (isIOS ? 'sms:&body=' : 'sms:?body=') + encodeURIComponent(body);
     window.location.href = uri;
   });
